@@ -97,6 +97,18 @@ func update(ctx context.Context, region string, allBuckets bool, bucketName stri
 		case <-ctx.Done():
 			return nil
 		default:
+			loc, err := client.GetBucketLocation(&s3.GetBucketLocationInput{Bucket: aws.String(bucketName)})
+			if err != nil {
+				return fmt.Errorf("%s: failed to get region for bucket: %v", bucketName, err)
+			}
+			if loc == nil || loc.LocationConstraint == nil {
+				fmt.Printf("%s: Skipping, is not in region '%v'\n", bucketName, region)
+				continue
+			}
+			if *loc.LocationConstraint != region {
+				fmt.Printf("%s: Skipping, is in region '%s', not '%v'\n", bucketName, *loc.LocationConstraint, region)
+				continue
+			}
 			err = applyRules(ctx, client, bucketName, logToBucketName, encrypt, version, sslOnly,
 				deleteOldVersions, deleteAfterDays)
 			if err != nil {
