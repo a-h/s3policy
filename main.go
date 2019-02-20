@@ -19,12 +19,17 @@ import (
 )
 
 var regionFlag = flag.String("region", "eu-west-2", "The AWS region to target.")
+var allBucketsFlag = flag.Bool("allBuckets", false, "set to true to process all buckets")
+var bucketFlag = flag.String("bucket", "", "the name of the bucket to process")
+
 var encryptFlag = flag.Bool("encrypt", true, "encrypt the bucket")
 var versionFlag = flag.Bool("version", true, "version the bucket")
 var sslOnlyFlag = flag.Bool("sslOnly", true, "limit bucket access to SSL")
+
 var logToBucketNameFlag = flag.String("logToBucket", "", "bucket to send logs to")
-var bucketFlag = flag.String("bucket", "", "the name of the bucket to process")
-var allBucketsFlag = flag.Bool("allBuckets", false, "set to true to process all buckets")
+
+var deleteOldVersionsFlag = flag.Bool("deleteOldVersions", true, "delete old versions automatically after a period")
+var deleteAfterDays = flag.Int("deleteAfterDays", 30, "the number of days after which to delete expired versions")
 
 func main() {
 	flag.Parse()
@@ -39,14 +44,29 @@ func main() {
 		cancel()
 	}()
 
-	err := update(ctx, *allBucketsFlag, *bucketFlag, *regionFlag)
+	err := updateWithFlags(ctx)
 	if err != nil {
 		os.Stderr.WriteString(err.Error())
 		os.Exit(-1)
 	}
 }
 
-func update(ctx context.Context, allBuckets bool, bucketName string, region string) (err error) {
+func updateWithFlags(ctx context.Context) (err error) {
+	region := *regionFlag
+	if region == "" {
+		return fmt.Errorf("missing region flag")
+	}
+	if *deleteOldVersionsFlag && *deleteAfterDays <= 0 {
+		return fmt.Errorf("invalid -deleteAfterDays flag value")
+	}
+	return update(ctx, region, *allBucketsFlag, *bucketFlag, *encryptFlag, *versionFlag, *sslOnlyFlag,
+		*logToBucketNameFlag, *deleteOldVersionsFlag, *deleteAfterDays)
+}
+
+func update(ctx context.Context, region string, allBuckets bool, bucketName string,
+	encrypt, version, sslOnly bool,
+	logToBucketName string,
+	deleteOldVersions bool, deleteAfterDays int) (err error) {
 	conf := aws.NewConfig().WithRegion(region)
 	sess, err := session.NewSession(conf)
 	if err != nil {
@@ -64,16 +84,17 @@ func update(ctx context.Context, allBuckets bool, bucketName string, region stri
 	if bucketName != "" {
 		buckets = append(buckets, bucketName)
 	}
-	for _, b := range buckets {
+	for _, bucketName := range buckets {
 		select {
 		case <-ctx.Done():
 			return nil
 		default:
-			err = applyRules(ctx, client, &b, logToBucketNameFlag, *encryptFlag, *versionFlag, *sslOnlyFlag)
+			err = applyRules(ctx, client, bucketName, logToBucketName, encrypt, version, sslOnly,
+				deleteOldVersions, deleteAfterDays)
 			if err != nil {
-				return fmt.Errorf("%s: failed to apply rules: %v", b, err)
+				return fmt.Errorf("%s: failed to apply rules: %v", bucketName, err)
 			}
-			fmt.Printf("%s: OK\n", b)
+			fmt.Printf("%s: OK\n", bucketName)
 		}
 	}
 	return nil
@@ -86,12 +107,12 @@ func getBucketNames(lbo *s3.ListBucketsOutput) (buckets []string) {
 	return
 }
 
-func applyRules(ctx context.Context, client *s3.S3, name *string, logToBucketName *string, encrypt, version, sslOnly bool) error {
+func applyRules(ctx context.Context, client *s3.S3, name string, logToBucketName string, encrypt, version, sslOnly, deleteOldVersions bool, deleteAfterDays int) error {
 	loc, err := client.GetBucketLocationWithContext(ctx, &s3.GetBucketLocationInput{
-		Bucket: name,
+		Bucket: aws.String(name),
 	})
 	if err != nil {
-		return fmt.Errorf("%s: failed to get bucket location: %v", *name, err)
+		return fmt.Errorf("%s: failed to get bucket location: %v", name, err)
 	}
 	if loc.LocationConstraint == nil {
 		// Skip, the bucket doesn't actually exist.
@@ -101,57 +122,105 @@ func applyRules(ctx context.Context, client *s3.S3, name *string, logToBucketNam
 		Region: aws.String(*loc.LocationConstraint),
 	})
 	if err != nil {
-		return fmt.Errorf("%s: failed to create local session: %v", *name, err)
+		return fmt.Errorf("%s: failed to create local session: %v", name, err)
 	}
 	localClient := s3.New(sess)
 	var ok bool
 	if encrypt {
-		fmt.Printf("%s: encrypting....\n", *name)
+		fmt.Printf("%s: encrypting....\n", name)
 		ok, err = encryptBucket(ctx, localClient, name)
 		if err != nil {
 			return err
 		}
 		if !ok {
-			fmt.Printf("%s:   - already encrypted\n", *name)
+			fmt.Printf("%s:   - already encrypted\n", name)
 		}
 	}
 	if version {
-		fmt.Printf("%s: versioning...\n", *name)
+		fmt.Printf("%s: versioning...\n", name)
 		ok, err = versionBucket(ctx, localClient, name)
 		if err != nil {
 			return err
 		}
 		if !ok {
-			fmt.Printf("%s:   - versioning already enabled\n", *name)
+			fmt.Printf("%s:   - versioning already enabled\n", name)
 		}
 	}
 	if sslOnly {
-		fmt.Printf("%s: disabling non-SSL access...\n", *name)
+		fmt.Printf("%s: disabling non-SSL access...\n", name)
 		ok, err = disableNonSSL(ctx, localClient, name)
 		if err != nil {
 			return err
 		}
 		if !ok {
-			fmt.Printf("%s:   - a policy is already set on the bucket\n", *name)
+			fmt.Printf("%s:   - a policy is already set on the bucket\n", name)
 		}
 	}
-	if logToBucketName != nil && *logToBucketName != "" {
-		fmt.Printf("%s: enabling logging to %s...\n", *name, *logToBucketName)
+	if logToBucketName != "" {
+		fmt.Printf("%s: enabling logging to %s...\n", name, logToBucketName)
 		ok, err = enableLogging(ctx, localClient, name, logToBucketName)
 		if err != nil {
 			return err
 		}
 		if !ok {
-			fmt.Printf("%s:   - already has logging enabled\n", *name)
+			fmt.Printf("%s:   - already has logging enabled\n", name)
+		}
+	}
+	if deleteOldVersions && deleteAfterDays > 0 {
+		fmt.Printf("%s: deleting old versions after %d days...\n", name, deleteAfterDays)
+		ok, err = deleteOldVersionsAfter(ctx, localClient, name, deleteAfterDays)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			fmt.Printf("%s:   - already has a lifecycle policy\n", name)
 		}
 	}
 
 	return nil
 }
 
-func enableLogging(ctx context.Context, client *s3.S3, name, logToBucketName *string) (ok bool, err error) {
+func deleteOldVersionsAfter(ctx context.Context, client *s3.S3, name string, days int) (ok bool, err error) {
+	resp, err := client.GetBucketLifecycleConfigurationWithContext(ctx, &s3.GetBucketLifecycleConfigurationInput{
+		Bucket: aws.String(name),
+	})
+	if err != nil {
+		awsErr, isAWSErr := err.(awserr.Error)
+		if !isAWSErr || awsErr.Code() != "NoSuchLifecycleConfiguration" {
+			err = fmt.Errorf("failed to get lifecycle configuration: %v", err)
+			return
+		}
+	}
+	if len(resp.Rules) > 0 {
+		return
+	}
+	_, err = client.PutBucketLifecycleConfigurationWithContext(ctx, &s3.PutBucketLifecycleConfigurationInput{
+		Bucket: aws.String(name),
+		LifecycleConfiguration: &s3.BucketLifecycleConfiguration{
+			Rules: []*s3.LifecycleRule{
+				&s3.LifecycleRule{
+					ID: aws.String("s3policyRemoveExpired"),
+					NoncurrentVersionExpiration: &s3.NoncurrentVersionExpiration{
+						NoncurrentDays: aws.Int64(int64(days)),
+					},
+					Filter:      &s3.LifecycleRuleFilter{},
+					Transitions: []*s3.Transition{},
+					Status:      aws.String(s3.ExpirationStatusEnabled),
+				},
+			},
+		},
+	})
+	if err != nil {
+		err = fmt.Errorf("failed to put bucket lifecycle: %v", err)
+		return
+	}
+	ok = true
+	return
+}
+
+func enableLogging(ctx context.Context, client *s3.S3, name, logToBucketName string) (ok bool, err error) {
 	resp, err := client.GetBucketLoggingWithContext(ctx, &s3.GetBucketLoggingInput{
-		Bucket: name,
+		Bucket: aws.String(name),
 	})
 	if err != nil {
 		if awsErr := err.(awserr.Error); awsErr.Code() != "ServerSideEncryptionConfigurationNotFoundError" {
@@ -163,10 +232,10 @@ func enableLogging(ctx context.Context, client *s3.S3, name, logToBucketName *st
 		return
 	}
 	_, err = client.PutBucketLoggingWithContext(ctx, &s3.PutBucketLoggingInput{
-		Bucket: name,
+		Bucket: aws.String(name),
 		BucketLoggingStatus: &s3.BucketLoggingStatus{
 			LoggingEnabled: &s3.LoggingEnabled{
-				TargetBucket: logToBucketName,
+				TargetBucket: aws.String(logToBucketName),
 				TargetPrefix: aws.String("s3logs/"),
 			},
 		},
@@ -179,9 +248,9 @@ func enableLogging(ctx context.Context, client *s3.S3, name, logToBucketName *st
 	return
 }
 
-func encryptBucket(ctx context.Context, client *s3.S3, name *string) (ok bool, err error) {
+func encryptBucket(ctx context.Context, client *s3.S3, name string) (ok bool, err error) {
 	resp, err := client.GetBucketEncryptionWithContext(ctx, &s3.GetBucketEncryptionInput{
-		Bucket: name,
+		Bucket: aws.String(name),
 	})
 	if err != nil {
 		if awsErr := err.(awserr.Error); awsErr.Code() != "ServerSideEncryptionConfigurationNotFoundError" {
@@ -193,7 +262,7 @@ func encryptBucket(ctx context.Context, client *s3.S3, name *string) (ok bool, e
 		return
 	}
 	_, err = client.PutBucketEncryptionWithContext(ctx, &s3.PutBucketEncryptionInput{
-		Bucket: name,
+		Bucket: aws.String(name),
 		ServerSideEncryptionConfiguration: &s3.ServerSideEncryptionConfiguration{
 			Rules: []*s3.ServerSideEncryptionRule{
 				&s3.ServerSideEncryptionRule{
@@ -212,9 +281,9 @@ func encryptBucket(ctx context.Context, client *s3.S3, name *string) (ok bool, e
 	return
 }
 
-func versionBucket(ctx context.Context, client *s3.S3, name *string) (ok bool, err error) {
+func versionBucket(ctx context.Context, client *s3.S3, name string) (ok bool, err error) {
 	resp, err := client.GetBucketVersioningWithContext(ctx, &s3.GetBucketVersioningInput{
-		Bucket: name,
+		Bucket: aws.String(name),
 	})
 	if err != nil {
 		err = fmt.Errorf("failed to get bucket versioning: %v", err)
@@ -224,7 +293,7 @@ func versionBucket(ctx context.Context, client *s3.S3, name *string) (ok bool, e
 		return
 	}
 	_, err = client.PutBucketVersioningWithContext(ctx, &s3.PutBucketVersioningInput{
-		Bucket: name,
+		Bucket: aws.String(name),
 		VersioningConfiguration: &s3.VersioningConfiguration{
 			Status: aws.String(s3.BucketVersioningStatusEnabled),
 		},
@@ -237,9 +306,9 @@ func versionBucket(ctx context.Context, client *s3.S3, name *string) (ok bool, e
 	return
 }
 
-func disableNonSSL(ctx context.Context, client *s3.S3, name *string) (ok bool, err error) {
+func disableNonSSL(ctx context.Context, client *s3.S3, name string) (ok bool, err error) {
 	bp, err := client.GetBucketPolicyWithContext(ctx, &s3.GetBucketPolicyInput{
-		Bucket: name,
+		Bucket: aws.String(name),
 	})
 	if err != nil {
 		awsErr, isAWSErr := err.(awserr.Error)
@@ -251,7 +320,7 @@ func disableNonSSL(ctx context.Context, client *s3.S3, name *string) (ok bool, e
 	if bp.Policy != nil {
 		return
 	}
-	escName, err := json.Marshal(*name)
+	escName, err := json.Marshal(name)
 	if err != nil {
 		err = fmt.Errorf("failed to JSON format name")
 		return
@@ -270,7 +339,7 @@ func disableNonSSL(ctx context.Context, client *s3.S3, name *string) (ok bool, e
 		]
 }`, strings.Trim(string(escName), `"`)))
 	_, err = client.PutBucketPolicyWithContext(ctx, &s3.PutBucketPolicyInput{
-		Bucket: name,
+		Bucket: aws.String(name),
 		Policy: policy,
 	})
 	if err != nil {
