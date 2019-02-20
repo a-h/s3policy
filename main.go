@@ -20,7 +20,7 @@ import (
 
 var regionFlag = flag.String("region", "eu-west-2", "The AWS region to target.")
 var allBucketsFlag = flag.Bool("allBuckets", false, "set to true to process all buckets")
-var bucketFlag = flag.String("bucket", "", "the name of the bucket to process")
+var bucketFlag = flag.String("bucket", "", "the name of a bucket to process")
 
 var encryptFlag = flag.Bool("encrypt", true, "encrypt the bucket")
 var versionFlag = flag.Bool("version", false, "version the bucket")
@@ -33,6 +33,10 @@ var deleteAfterDays = flag.Int("deleteAfterDays", 0, "the number of days after w
 
 func main() {
 	flag.Parse()
+	if *bucketFlag == "" && !*allBucketsFlag {
+		flag.Usage()
+		return
+	}
 
 	sigs := make(chan os.Signal)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
@@ -47,6 +51,7 @@ func main() {
 	err := updateWithFlags(ctx)
 	if err != nil {
 		os.Stderr.WriteString(err.Error())
+		os.Stderr.WriteString("\n")
 		os.Exit(-1)
 	}
 }
@@ -55,6 +60,9 @@ func updateWithFlags(ctx context.Context) (err error) {
 	region := *regionFlag
 	if region == "" {
 		return fmt.Errorf("missing region flag")
+	}
+	if *allBucketsFlag && *bucketFlag != "" {
+		return fmt.Errorf("cannot set process -allBuckets and an individual -bucket")
 	}
 	if *deleteOldVersionsFlag && *deleteAfterDays <= 0 {
 		return fmt.Errorf("invalid -deleteAfterDays flag value")
