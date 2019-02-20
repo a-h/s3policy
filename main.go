@@ -23,13 +23,13 @@ var allBucketsFlag = flag.Bool("allBuckets", false, "set to true to process all 
 var bucketFlag = flag.String("bucket", "", "the name of the bucket to process")
 
 var encryptFlag = flag.Bool("encrypt", true, "encrypt the bucket")
-var versionFlag = flag.Bool("version", true, "version the bucket")
+var versionFlag = flag.Bool("version", false, "version the bucket")
 var sslOnlyFlag = flag.Bool("sslOnly", true, "limit bucket access to SSL")
 
 var logToBucketNameFlag = flag.String("logToBucket", "", "bucket to send logs to")
 
-var deleteOldVersionsFlag = flag.Bool("deleteOldVersions", true, "delete old versions automatically after a period")
-var deleteAfterDays = flag.Int("deleteAfterDays", 30, "the number of days after which to delete expired versions")
+var deleteOldVersionsFlag = flag.Bool("deleteOldVersions", false, "delete old versions automatically after a period")
+var deleteAfterDays = flag.Int("deleteAfterDays", 0, "the number of days after which to delete expired versions")
 
 func main() {
 	flag.Parse()
