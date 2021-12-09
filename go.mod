@@ -1,4 +1,4 @@
-module github.com/aviva-verde/s3policy
+module github.com/a-h/s3policy
 
 go 1.17
 
