@@ -5,7 +5,7 @@ Applies S3 policies and settings which pass AWS Config's default settings.
 ## Installation
 
 ```bash
-go get -u github.com/a-h/s3policy
+go install github.com/a-h/s3policy@latest
 ```
 
 ## Usage
