@@ -25,17 +25,66 @@ var bucketFlag = flag.String("bucket", "", "the name of a bucket to process")
 var encryptFlag = flag.Bool("encrypt", true, "encrypt the bucket")
 var versionFlag = flag.Bool("version", false, "version the bucket")
 var sslOnlyFlag = flag.Bool("sslOnly", true, "limit bucket access to SSL")
+var blockPublicAccessFlag = flag.Bool("blockPublicAccess", true, "prevent public bucket access")
 
 var logToBucketNameFlag = flag.String("logToBucket", "", "bucket to send logs to")
 
 var deleteOldVersionsFlag = flag.Bool("deleteOldVersions", false, "delete old versions automatically after a period")
-var deleteAfterDays = flag.Int("deleteAfterDays", 0, "the number of days after which to delete expired versions")
+var deleteAfterDaysFlag = flag.Int("deleteAfterDays", 0, "the number of days after which to delete expired versions")
+
+func getConf() (conf config) {
+	flag.Parse()
+	conf.region = *regionFlag
+	conf.allBuckets = *allBucketsFlag
+	conf.bucketName = *bucketFlag
+	conf.encrypt = *encryptFlag
+	conf.version = *versionFlag
+	conf.sslOnly = *sslOnlyFlag
+	conf.blockPublicAccess = *blockPublicAccessFlag
+	conf.logToBucketName = *logToBucketNameFlag
+	conf.deleteOldVersions = *deleteOldVersionsFlag
+	conf.deleteAfterDays = *deleteAfterDaysFlag
+	return conf
+}
+
+type config struct {
+	region            string
+	allBuckets        bool
+	bucketName        string
+	encrypt           bool
+	version           bool
+	sslOnly           bool
+	blockPublicAccess bool
+	logToBucketName   string
+	deleteOldVersions bool
+	deleteAfterDays   int
+}
+
+func (c config) valid() (msgs []string, ok bool) {
+	if c.bucketName == "" && !c.allBuckets {
+		msgs = append(msgs, "must set a single bucket name or allBuckets flag")
+	}
+	if c.region == "" {
+		msgs = append(msgs, "missing region flag")
+	}
+	if c.allBuckets && c.bucketName != "" {
+		msgs = append(msgs, "cannot set process -allBuckets and an individual -bucket")
+	}
+	if c.deleteOldVersions && c.deleteAfterDays <= 0 {
+		msgs = append(msgs, "invalid -deleteAfterDays flag value")
+	}
+	return msgs, len(msgs) == 0
+}
 
 func main() {
-	flag.Parse()
-	if *bucketFlag == "" && !*allBucketsFlag {
+	conf := getConf()
+	if messages, ok := conf.valid(); !ok {
+		for _, msg := range messages {
+			os.Stdout.WriteString(msg)
+			os.Stdout.WriteString("\n")
+		}
 		flag.Usage()
-		return
+		os.Exit(-1)
 	}
 
 	sigs := make(chan os.Signal)
@@ -48,7 +97,7 @@ func main() {
 		cancel()
 	}()
 
-	err := updateWithFlags(ctx)
+	err := update(ctx, conf)
 	if err != nil {
 		os.Stderr.WriteString(err.Error())
 		os.Stderr.WriteString("\n")
@@ -56,27 +105,8 @@ func main() {
 	}
 }
 
-func updateWithFlags(ctx context.Context) (err error) {
-	region := *regionFlag
-	if region == "" {
-		return fmt.Errorf("missing region flag")
-	}
-	if *allBucketsFlag && *bucketFlag != "" {
-		return fmt.Errorf("cannot set process -allBuckets and an individual -bucket")
-	}
-	if *deleteOldVersionsFlag && *deleteAfterDays <= 0 {
-		return fmt.Errorf("invalid -deleteAfterDays flag value")
-	}
-	return update(ctx, region, *allBucketsFlag, *bucketFlag, *encryptFlag, *versionFlag, *sslOnlyFlag,
-		*logToBucketNameFlag, *deleteOldVersionsFlag, *deleteAfterDays)
-}
-
-func update(ctx context.Context, region string, allBuckets bool, bucketName string,
-	encrypt, version, sslOnly bool,
-	logToBucketName string,
-	deleteOldVersions bool, deleteAfterDays int) (err error) {
-	conf := aws.NewConfig().WithRegion(region)
-	sess, err := session.NewSession(conf)
+func update(ctx context.Context, conf config) (err error) {
+	sess, err := session.NewSession(aws.NewConfig().WithRegion(conf.region))
 	if err != nil {
 		return
 	}
@@ -86,11 +116,11 @@ func update(ctx context.Context, region string, allBuckets bool, bucketName stri
 		return fmt.Errorf("failed to list buckets: %v", err)
 	}
 	buckets := []string{}
-	if allBuckets {
+	if conf.allBuckets {
 		buckets = append(buckets, getBucketNames(lbr)...)
 	}
-	if bucketName != "" {
-		buckets = append(buckets, bucketName)
+	if conf.bucketName != "" {
+		buckets = append(buckets, conf.bucketName)
 	}
 	for _, bucketName := range buckets {
 		select {
@@ -102,15 +132,14 @@ func update(ctx context.Context, region string, allBuckets bool, bucketName stri
 				return fmt.Errorf("%s: failed to get region for bucket: %v", bucketName, err)
 			}
 			if loc == nil || loc.LocationConstraint == nil {
-				fmt.Printf("%s: Skipping, is not in region '%v'\n", bucketName, region)
+				fmt.Printf("%s: Skipping, is not in region '%v'\n", bucketName, conf.region)
 				continue
 			}
-			if *loc.LocationConstraint != region {
-				fmt.Printf("%s: Skipping, is in region '%s', not '%v'\n", bucketName, *loc.LocationConstraint, region)
+			if *loc.LocationConstraint != conf.region {
+				fmt.Printf("%s: Skipping, is in region '%s', not '%v'\n", bucketName, *loc.LocationConstraint, conf.region)
 				continue
 			}
-			err = applyRules(ctx, client, bucketName, logToBucketName, encrypt, version, sslOnly,
-				deleteOldVersions, deleteAfterDays)
+			err = applyRules(ctx, client, bucketName, conf)
 			if err != nil {
 				return fmt.Errorf("%s: failed to apply rules: %v", bucketName, err)
 			}
@@ -127,7 +156,7 @@ func getBucketNames(lbo *s3.ListBucketsOutput) (buckets []string) {
 	return
 }
 
-func applyRules(ctx context.Context, client *s3.S3, name string, logToBucketName string, encrypt, version, sslOnly, deleteOldVersions bool, deleteAfterDays int) error {
+func applyRules(ctx context.Context, client *s3.S3, name string, conf config) error {
 	loc, err := client.GetBucketLocationWithContext(ctx, &s3.GetBucketLocationInput{
 		Bucket: aws.String(name),
 	})
@@ -146,7 +175,7 @@ func applyRules(ctx context.Context, client *s3.S3, name string, logToBucketName
 	}
 	localClient := s3.New(sess)
 	var ok bool
-	if encrypt {
+	if conf.encrypt {
 		fmt.Printf("%s: encrypting....\n", name)
 		ok, err = encryptBucket(ctx, localClient, name)
 		if err != nil {
@@ -156,7 +185,7 @@ func applyRules(ctx context.Context, client *s3.S3, name string, logToBucketName
 			fmt.Printf("%s:   - already encrypted\n", name)
 		}
 	}
-	if version {
+	if conf.version {
 		fmt.Printf("%s: versioning...\n", name)
 		ok, err = versionBucket(ctx, localClient, name)
 		if err != nil {
@@ -166,7 +195,17 @@ func applyRules(ctx context.Context, client *s3.S3, name string, logToBucketName
 			fmt.Printf("%s:   - versioning already enabled\n", name)
 		}
 	}
-	if sslOnly {
+	if conf.blockPublicAccess {
+		fmt.Printf("%s: blocking public access...\n", name)
+		ok, err = blockPublicAccess(ctx, localClient, name)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			fmt.Printf("%s:   - public access already blocked\n", name)
+		}
+	}
+	if conf.sslOnly {
 		fmt.Printf("%s: disabling non-SSL access...\n", name)
 		ok, err = disableNonSSL(ctx, localClient, name)
 		if err != nil {
@@ -176,9 +215,9 @@ func applyRules(ctx context.Context, client *s3.S3, name string, logToBucketName
 			fmt.Printf("%s:   - a policy is already set on the bucket\n", name)
 		}
 	}
-	if logToBucketName != "" {
-		fmt.Printf("%s: enabling logging to %s...\n", name, logToBucketName)
-		ok, err = enableLogging(ctx, localClient, name, logToBucketName)
+	if conf.logToBucketName != "" {
+		fmt.Printf("%s: enabling logging to %s...\n", name, conf.logToBucketName)
+		ok, err = enableLogging(ctx, localClient, name, conf.logToBucketName)
 		if err != nil {
 			return err
 		}
@@ -186,9 +225,9 @@ func applyRules(ctx context.Context, client *s3.S3, name string, logToBucketName
 			fmt.Printf("%s:   - already has logging enabled\n", name)
 		}
 	}
-	if deleteOldVersions && deleteAfterDays > 0 {
-		fmt.Printf("%s: deleting old versions after %d days...\n", name, deleteAfterDays)
-		ok, err = deleteOldVersionsAfter(ctx, localClient, name, deleteAfterDays)
+	if conf.deleteOldVersions && conf.deleteAfterDays > 0 {
+		fmt.Printf("%s: deleting old versions after %d days...\n", name, conf.deleteAfterDays)
+		ok, err = deleteOldVersionsAfter(ctx, localClient, name, conf.deleteAfterDays)
 		if err != nil {
 			return err
 		}
@@ -218,7 +257,7 @@ func deleteOldVersionsAfter(ctx context.Context, client *s3.S3, name string, day
 		Bucket: aws.String(name),
 		LifecycleConfiguration: &s3.BucketLifecycleConfiguration{
 			Rules: []*s3.LifecycleRule{
-				&s3.LifecycleRule{
+				{
 					ID: aws.String("s3policyRemoveExpired"),
 					NoncurrentVersionExpiration: &s3.NoncurrentVersionExpiration{
 						NoncurrentDays: aws.Int64(int64(days)),
@@ -285,7 +324,7 @@ func encryptBucket(ctx context.Context, client *s3.S3, name string) (ok bool, er
 		Bucket: aws.String(name),
 		ServerSideEncryptionConfiguration: &s3.ServerSideEncryptionConfiguration{
 			Rules: []*s3.ServerSideEncryptionRule{
-				&s3.ServerSideEncryptionRule{
+				{
 					ApplyServerSideEncryptionByDefault: &s3.ServerSideEncryptionByDefault{
 						SSEAlgorithm: aws.String(s3.ServerSideEncryptionAes256),
 					},
@@ -320,6 +359,24 @@ func versionBucket(ctx context.Context, client *s3.S3, name string) (ok bool, er
 	})
 	if err != nil {
 		err = fmt.Errorf("failed to apply versioning: %v", err)
+		return
+	}
+	ok = true
+	return
+}
+
+func blockPublicAccess(ctx context.Context, client *s3.S3, name string) (ok bool, err error) {
+	_, err = client.PutPublicAccessBlockWithContext(ctx, &s3.PutPublicAccessBlockInput{
+		Bucket: aws.String(name),
+		PublicAccessBlockConfiguration: &s3.PublicAccessBlockConfiguration{
+			BlockPublicAcls:       aws.Bool(true),
+			BlockPublicPolicy:     aws.Bool(true),
+			IgnorePublicAcls:      aws.Bool(true),
+			RestrictPublicBuckets: aws.Bool(true),
+		},
+	})
+	if err != nil {
+		err = fmt.Errorf("failed to block public access: %v", err)
 		return
 	}
 	ok = true
