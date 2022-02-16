@@ -370,8 +370,11 @@ func blockPublicAccess(ctx context.Context, client *s3.S3, name string) (ok bool
 		Bucket: aws.String(name),
 	})
 	if err != nil {
-		err = fmt.Errorf("failed to get public access block: %w", err)
-		return
+		awsErr, isAWSErr := err.(awserr.Error)
+		if !isAWSErr || awsErr.Code() != "NoSuchPublicAccessBlockConfiguration" {
+			err = fmt.Errorf("failed to get public access block: %w", err)
+			return
+		}
 	}
 	if resp.PublicAccessBlockConfiguration != nil &&
 		resp.PublicAccessBlockConfiguration.BlockPublicAcls != nil && *resp.PublicAccessBlockConfiguration.BlockPublicAcls &&
