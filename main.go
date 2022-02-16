@@ -366,6 +366,20 @@ func versionBucket(ctx context.Context, client *s3.S3, name string) (ok bool, er
 }
 
 func blockPublicAccess(ctx context.Context, client *s3.S3, name string) (ok bool, err error) {
+	resp, err := client.GetPublicAccessBlockWithContext(ctx, &s3.GetPublicAccessBlockInput{
+		Bucket: aws.String(name),
+	})
+	if err != nil {
+		err = fmt.Errorf("failed to get public access block: %w", err)
+		return
+	}
+	if resp.PublicAccessBlockConfiguration != nil &&
+		resp.PublicAccessBlockConfiguration.BlockPublicAcls != nil && *resp.PublicAccessBlockConfiguration.BlockPublicAcls &&
+		resp.PublicAccessBlockConfiguration.BlockPublicPolicy != nil && *resp.PublicAccessBlockConfiguration.BlockPublicPolicy &&
+		resp.PublicAccessBlockConfiguration.IgnorePublicAcls != nil && *resp.PublicAccessBlockConfiguration.IgnorePublicAcls &&
+		resp.PublicAccessBlockConfiguration.RestrictPublicBuckets != nil && *resp.PublicAccessBlockConfiguration.RestrictPublicBuckets {
+		return
+	}
 	_, err = client.PutPublicAccessBlockWithContext(ctx, &s3.PutPublicAccessBlockInput{
 		Bucket: aws.String(name),
 		PublicAccessBlockConfiguration: &s3.PublicAccessBlockConfiguration{
